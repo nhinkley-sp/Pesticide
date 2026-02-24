@@ -2,8 +2,10 @@ mod app;
 mod pest;
 mod tree;
 mod ui;
+mod watcher;
 
 use std::io;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -18,6 +20,7 @@ use app::{App, FocusPanel, ViewMode};
 use pest::discovery;
 use pest::runner::RunScope;
 use tree::node::NodeKind;
+use watcher::WatchEvent;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,6 +60,15 @@ async fn main() -> Result<()> {
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     let mut run_handle: Option<pest::runner::RunHandle> = None;
 
+    // Channel for file-watcher events
+    let (watch_tx, watch_rx) = mpsc::channel::<WatchEvent>();
+
+    // Holds the debouncer while watch mode is active; dropping it stops the watcher.
+    let mut debouncer: Option<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> = None;
+
+    // Track the previous watching state so we can detect toggles.
+    let mut was_watching = false;
+
     loop {
         terminal.draw(|f| ui::render(f, app))?;
 
@@ -72,6 +84,47 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                     ViewMode::Tree => handle_tree_keys(app, key.code, &mut run_handle),
                     ViewMode::CoverageTable => handle_coverage_table_keys(app, key.code),
                     ViewMode::CoverageSource => handle_coverage_source_keys(app, key.code),
+                }
+            }
+        }
+
+        // Handle watch mode toggling
+        if app.watching && !was_watching {
+            // Watch mode just turned ON: start the watcher.
+            match watcher::start_watcher(&app.project_root, watch_tx.clone()) {
+                Ok(d) => {
+                    debouncer = Some(d);
+                    app.status_message = "Watch mode ON".to_string();
+                }
+                Err(e) => {
+                    app.watching = false;
+                    app.status_message = format!("Watch error: {}", e);
+                }
+            }
+        } else if !app.watching && was_watching {
+            // Watch mode just turned OFF: drop the debouncer to stop watching.
+            debouncer = None;
+            app.status_message = "Watch mode OFF".to_string();
+        }
+        was_watching = app.watching;
+
+        // Process file-watcher events (non-blocking)
+        if app.watching {
+            while let Ok(watch_event) = watch_rx.try_recv() {
+                match watch_event {
+                    WatchEvent::TestFileChanged(path) => {
+                        start_test_run(app, RunScope::File(path), &mut run_handle);
+                    }
+                    WatchEvent::SourceFileChanged(_path) => {
+                        start_test_run(app, RunScope::All, &mut run_handle);
+                    }
+                    WatchEvent::TestFileCreatedOrDeleted => {
+                        // Re-discover tests, then run all
+                        if let Ok(output) = discovery::run_list_tests(&app.project_root) {
+                            app.tree = discovery::parse_test_list(&output, &app.project_root);
+                        }
+                        start_test_run(app, RunScope::All, &mut run_handle);
+                    }
                 }
             }
         }
@@ -101,6 +154,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
             if let Some(ref mut handle) = run_handle {
                 handle.kill();
             }
+            // Drop the debouncer to stop the watcher
+            drop(debouncer);
             return Ok(());
         }
     }
