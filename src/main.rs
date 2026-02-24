@@ -5,10 +5,12 @@ mod ui;
 mod watcher;
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
+use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -22,11 +24,32 @@ use pest::runner::RunScope;
 use tree::node::NodeKind;
 use watcher::WatchEvent;
 
+#[derive(Parser)]
+#[command(name = "pesticide", version, about = "A TUI for running Pest PHP tests")]
+struct Cli {
+    /// Path to Laravel project root (defaults to current directory)
+    #[arg(short, long)]
+    path: Option<PathBuf>,
+
+    /// Disable parallel test execution
+    #[arg(long)]
+    no_parallel: bool,
+
+    /// Start with watch mode enabled
+    #[arg(short, long)]
+    watch: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Find project root
-    let cwd = std::env::current_dir()?;
-    let project_root = discovery::find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let cli = Cli::parse();
+
+    // Find project root — use --path if provided, otherwise detect from cwd
+    let base_dir = match cli.path {
+        Some(ref p) => std::fs::canonicalize(p)?,
+        None => std::env::current_dir()?,
+    };
+    let project_root = discovery::find_project_root(&base_dir).unwrap_or_else(|| base_dir.clone());
 
     // Discover tests
     let tree_root = match discovery::run_list_tests(&project_root) {
@@ -35,6 +58,8 @@ async fn main() -> Result<()> {
     };
 
     let mut app = App::new(tree_root, project_root);
+    app.parallel = !cli.no_parallel;
+    app.watching = cli.watch;
 
     // Setup terminal
     enable_raw_mode()?;
