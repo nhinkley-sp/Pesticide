@@ -58,8 +58,8 @@ pub fn parse_test_list(output: &str, project_root: &Path) -> TreeNode {
         // single underscores represent spaces
         let display_name = clean_name.replace("__", "\x00").replace('_', " ").replace('\x00', "_");
 
-        // Build the path incrementally for node paths
-        let mut current_path = project_root.to_path_buf();
+        // Build the path incrementally for node paths (include tests/ prefix)
+        let mut current_path = project_root.join("tests");
 
         // Navigate/create directory nodes
         let mut current_node = &mut root;

@@ -168,6 +168,12 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                     app.running = false;
                     run_handle = None;
 
+                    // Parse JUnit results and update tree
+                    let results = pest::runner::parse_junit_results(&app.project_root);
+                    for result in &results {
+                        app.apply_test_result(result);
+                    }
+
                     // If a coverage run just finished, load the results and switch view
                     if app.coverage_pending {
                         app.coverage_pending = false;

@@ -53,17 +53,20 @@ pub fn build_pest_command(
     let mut cmd = Command::new(pest_bin);
     cmd.current_dir(project_root);
 
-    // Add scope-specific arguments
+    // Add scope-specific arguments — Pest expects paths relative to project root
     match scope {
         RunScope::All => {}
         RunScope::File(path) => {
-            cmd.arg(path);
+            let rel = path.strip_prefix(project_root).unwrap_or(path);
+            cmd.arg(rel);
         }
         RunScope::Directory(path) => {
-            cmd.arg(path);
+            let rel = path.strip_prefix(project_root).unwrap_or(path);
+            cmd.arg(rel);
         }
         RunScope::Test { file, name } => {
-            cmd.arg(file);
+            let rel = file.strip_prefix(project_root).unwrap_or(file);
+            cmd.arg(rel);
             cmd.arg("--filter");
             cmd.arg(name);
         }
@@ -73,8 +76,10 @@ pub fn build_pest_command(
         cmd.arg("--parallel");
     }
 
-    // Always add --teamcity for structured output parsing
-    cmd.arg("--teamcity");
+    // Use --log-junit for structured result parsing (works with both parallel and sequential)
+    let junit_path = project_root.join(".pesticide/results.xml");
+    cmd.arg("--log-junit");
+    cmd.arg(&junit_path);
 
     if coverage {
         cmd.arg("--coverage-clover");
@@ -92,16 +97,18 @@ pub fn build_pest_command(
 /// - Creates `.pesticide` dir if needed
 /// - Builds and spawns the command
 /// - Spawns tokio tasks to stream stdout/stderr line by line
-/// - Parses TeamCity messages from stdout to build `TestResult`s
 /// - Pushes all lines to `output_lines`
 /// - Returns a `RunHandle` holding the child process
+///
+/// Note: Test results are parsed from the JUnit XML file after the run completes
+/// (see `parse_junit_results`), not from the streaming output.
 pub fn run_tests(
     project_root: &Path,
     scope: &RunScope,
     parallel: bool,
     coverage: bool,
     output_lines: Arc<Mutex<Vec<String>>>,
-    results: Arc<Mutex<Vec<TestResult>>>,
+    _results: Arc<Mutex<Vec<TestResult>>>,
 ) -> Result<RunHandle> {
     // Create .pesticide directory if it doesn't exist
     let pesticide_dir = project_root.join(".pesticide");
@@ -114,55 +121,115 @@ pub fn run_tests(
     let stdout = child.stdout.take().expect("stdout should be piped");
     let stderr = child.stderr.take().expect("stderr should be piped");
 
-    // Spawn task for stdout
+    // Spawn task for stdout — stream output for display, strip ANSI codes
     let stdout_output_lines = Arc::clone(&output_lines);
-    let stdout_results = Arc::clone(&results);
     tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            // Parse TeamCity messages for test results
-            if line.contains("##teamcity[testFailed") {
-                if let Some(name) = extract_teamcity_attr(&line, "name") {
-                    let mut res = stdout_results.lock().unwrap();
-                    res.push(TestResult {
-                        name,
-                        status: TestStatus::Failed,
-                    });
-                }
-            } else if line.contains("##teamcity[testFinished") {
-                if let Some(name) = extract_teamcity_attr(&line, "name") {
-                    // Only mark as passed if not already marked as failed
-                    let mut res = stdout_results.lock().unwrap();
-                    let already_failed = res.iter().any(|r| {
-                        r.name == name && r.status == TestStatus::Failed
-                    });
-                    if !already_failed {
-                        res.push(TestResult {
-                            name,
-                            status: TestStatus::Passed,
-                        });
-                    }
-                }
+            let clean = strip_ansi_codes(&line);
+            if !clean.trim().is_empty() {
+                let mut lines_vec = stdout_output_lines.lock().unwrap();
+                lines_vec.push(clean);
             }
-
-            let mut lines_vec = stdout_output_lines.lock().unwrap();
-            lines_vec.push(line);
         }
     });
 
-    // Spawn task for stderr
+    // Spawn task for stderr — strip ANSI codes
     let stderr_output_lines = Arc::clone(&output_lines);
     tokio::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let mut lines_vec = stderr_output_lines.lock().unwrap();
-            lines_vec.push(line);
+            let clean = strip_ansi_codes(&line);
+            if !clean.trim().is_empty() {
+                let mut lines_vec = stderr_output_lines.lock().unwrap();
+                lines_vec.push(clean);
+            }
         }
     });
 
     Ok(RunHandle { child })
+}
+
+/// Parse JUnit XML results file written by `--log-junit`.
+/// Returns a list of TestResult with pass/fail status for each test.
+pub fn parse_junit_results(project_root: &Path) -> Vec<TestResult> {
+    let junit_path = project_root.join(".pesticide/results.xml");
+    let xml = match std::fs::read_to_string(&junit_path) {
+        Ok(xml) => xml,
+        Err(_) => return Vec::new(),
+    };
+
+    let doc = match roxmltree::Document::parse(&xml) {
+        Ok(doc) => doc,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+    for testcase in doc.descendants().filter(|n| n.has_tag_name("testcase")) {
+        let name = match testcase.attribute("name") {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        // A testcase with a <failure> child element is a failure
+        let has_failure = testcase.children().any(|c| c.has_tag_name("failure"));
+        let has_error = testcase.children().any(|c| c.has_tag_name("error"));
+        let has_skipped = testcase.children().any(|c| c.has_tag_name("skipped"));
+
+        let status = if has_failure || has_error {
+            TestStatus::Failed
+        } else if has_skipped {
+            TestStatus::NotRun
+        } else {
+            TestStatus::Passed
+        };
+
+        results.push(TestResult { name, status });
+    }
+
+    results
+}
+
+/// Strip ANSI escape sequences from a string.
+fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // ESC sequence — skip until we hit a letter or reach end
+            match chars.peek() {
+                Some('[') => {
+                    // CSI sequence: ESC [ ... <letter>
+                    chars.next(); // consume '['
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC sequence: ESC ] ... ST (or BEL)
+                    chars.next(); // consume ']'
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next == '\x07' || next == '\\' {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    // Other ESC sequence, skip next char
+                    chars.next();
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 /// Extracts an attribute value from a TeamCity message line.
@@ -255,7 +322,7 @@ mod tests {
             .map(|a| a.to_str().unwrap().to_string())
             .collect();
         assert!(args.contains(&"--parallel".to_string()));
-        assert!(args.contains(&"--teamcity".to_string()));
+        assert!(args.contains(&"--log-junit".to_string()));
     }
 
     #[test]
@@ -305,5 +372,39 @@ mod tests {
         assert!(args.contains(&"tests/ExampleTest.php".to_string()));
         assert!(args.contains(&"--filter".to_string()));
         assert!(args.contains(&"it works".to_string()));
+    }
+
+    #[test]
+    fn test_strip_ansi_codes() {
+        assert_eq!(strip_ansi_codes("\x1b[90mTests:\x1b[39m"), "Tests:");
+        assert_eq!(strip_ansi_codes("\x1b[32;1m1 passed\x1b[39;22m"), "1 passed");
+        assert_eq!(strip_ansi_codes("no escapes here"), "no escapes here");
+        assert_eq!(strip_ansi_codes("\x1b]3;title\x07rest"), "rest");
+    }
+
+    #[test]
+    fn test_parse_junit_results_from_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="Tests\Feature\AuthTest">
+    <testcase name="it can login" class="Tests\Feature\AuthTest" time="0.1"/>
+    <testcase name="it rejects bad password" class="Tests\Feature\AuthTest" time="0.05">
+      <failure>Expected 401, got 200</failure>
+    </testcase>
+  </testsuite>
+</testsuites>"#;
+
+        // Write to temp file and parse
+        let tmp = tempfile::tempdir().unwrap();
+        let pesticide_dir = tmp.path().join(".pesticide");
+        std::fs::create_dir_all(&pesticide_dir).unwrap();
+        std::fs::write(pesticide_dir.join("results.xml"), xml).unwrap();
+
+        let results = parse_junit_results(tmp.path());
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].name, "it can login");
+        assert_eq!(results[0].status, TestStatus::Passed);
+        assert_eq!(results[1].name, "it rejects bad password");
+        assert_eq!(results[1].status, TestStatus::Failed);
     }
 }
