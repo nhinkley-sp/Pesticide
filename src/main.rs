@@ -80,10 +80,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                     app.should_quit = true;
                 }
 
-                match app.view_mode {
-                    ViewMode::Tree => handle_tree_keys(app, key.code, &mut run_handle),
-                    ViewMode::CoverageTable => handle_coverage_table_keys(app, key.code),
-                    ViewMode::CoverageSource => handle_coverage_source_keys(app, key.code),
+                if app.filter_active {
+                    handle_filter_keys(app, key.code);
+                } else {
+                    match app.view_mode {
+                        ViewMode::Tree => handle_tree_keys(app, key.code, &mut run_handle),
+                        ViewMode::CoverageTable => handle_coverage_table_keys(app, key.code),
+                        ViewMode::CoverageSource => handle_coverage_source_keys(app, key.code),
+                    }
                 }
             }
         }
@@ -311,8 +315,47 @@ fn handle_tree_keys(
                 start_test_run(app, scope, run_handle, false);
             }
         }
+        KeyCode::Char('f') => {
+            app.filter_active = true;
+            app.filter_text = Some(String::new());
+        }
         KeyCode::Char('a') => {
             start_test_run(app, RunScope::All, run_handle, false);
+        }
+        KeyCode::Esc => {
+            // Clear any active filter
+            if app.filter_text.is_some() {
+                app.filter_text = None;
+                app.selected_index = 0;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_filter_keys(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Char(c) => {
+            if let Some(ref mut text) = app.filter_text {
+                text.push(c);
+            }
+            app.selected_index = 0;
+        }
+        KeyCode::Backspace => {
+            if let Some(ref mut text) = app.filter_text {
+                text.pop();
+            }
+            app.selected_index = 0;
+        }
+        KeyCode::Enter => {
+            // Confirm filter: keep filter_text, exit filter input mode
+            app.filter_active = false;
+        }
+        KeyCode::Esc => {
+            // Cancel filter: clear filter_text and exit filter input mode
+            app.filter_active = false;
+            app.filter_text = None;
+            app.selected_index = 0;
         }
         _ => {}
     }

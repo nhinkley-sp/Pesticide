@@ -85,6 +85,15 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    if let Some(ref filter) = app.filter_text {
+        if !filter.is_empty() && !app.filter_active {
+            spans.push(Span::styled(
+                format!("  [filter: {}]", filter),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+    }
+
     if !app.status_message.is_empty() {
         spans.push(Span::styled(
             format!("  {}", app.status_message),

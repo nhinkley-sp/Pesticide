@@ -64,6 +64,7 @@ pub struct App {
     pub watching: bool,
     pub running: bool,
     pub should_quit: bool,
+    pub filter_active: bool,
     pub filter_text: Option<String>,
     pub coverage_files: Vec<CoverageFile>,
     pub coverage_selected: usize,
@@ -93,6 +94,7 @@ impl App {
             watching: false,
             running: false,
             should_quit: false,
+            filter_active: false,
             filter_text: None,
             coverage_files: Vec::new(),
             coverage_selected: 0,
@@ -109,8 +111,18 @@ impl App {
     }
 
     /// Returns a flat list of `(depth, &TreeNode)` for all visible (expanded) nodes.
+    /// When a filter is active, only nodes whose name matches the filter are returned.
     pub fn visible_nodes(&self) -> Vec<(usize, &TreeNode)> {
-        self.tree.flatten()
+        let all = self.tree.flatten();
+        match &self.filter_text {
+            Some(filter) if !filter.is_empty() => {
+                let filter_lower = filter.to_lowercase();
+                all.into_iter()
+                    .filter(|(_, node)| node.name.to_lowercase().contains(&filter_lower))
+                    .collect()
+            }
+            _ => all,
+        }
     }
 
     /// Returns the currently selected node, if any.
@@ -463,6 +475,7 @@ mod tests {
         assert!(!app.watching);
         assert!(!app.running);
         assert!(!app.should_quit);
+        assert!(!app.filter_active);
         assert!(app.filter_text.is_none());
         assert!(app.coverage_files.is_empty());
         assert_eq!(app.coverage_selected, 0);

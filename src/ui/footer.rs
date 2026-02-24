@@ -9,6 +9,18 @@ use ratatui::{
 use crate::app::{App, ViewMode};
 
 pub fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+    // When filter input is active, show filter prompt instead of keybindings
+    if app.filter_active {
+        let filter_text = app.filter_text.as_deref().unwrap_or("");
+        let line = Line::from(vec![
+            Span::styled("Filter: ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}_", filter_text), Style::default().fg(Color::White)),
+        ]);
+        let paragraph = Paragraph::new(line);
+        f.render_widget(paragraph, area);
+        return;
+    }
+
     let key_style = Style::default().fg(Color::Yellow);
     let desc_style = Style::default();
     let sep = Span::styled("  ", desc_style);
