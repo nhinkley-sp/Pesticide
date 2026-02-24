@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anyhow::Context;
+
+use crate::pest::coverage;
 use crate::pest::runner::TestResult;
 use crate::tree::node::{NodeKind, TreeNode};
 
@@ -68,6 +71,8 @@ pub struct App {
     pub coverage_source_lines: Vec<CoverageSourceLine>,
     pub coverage_source_scroll: usize,
     pub coverage_threshold: f64,
+    pub coverage_pending: bool,
+    pub coverage_drill_pending: bool,
     pub status_message: String,
     pub shared_output: Arc<Mutex<Vec<String>>>,
     pub shared_results: Arc<Mutex<Vec<TestResult>>>,
@@ -95,6 +100,8 @@ impl App {
             coverage_source_lines: Vec::new(),
             coverage_source_scroll: 0,
             coverage_threshold: 80.0,
+            coverage_pending: false,
+            coverage_drill_pending: false,
             status_message: String::new(),
             shared_output: Arc::new(Mutex::new(Vec::new())),
             shared_results: Arc::new(Mutex::new(Vec::new())),
@@ -235,6 +242,40 @@ impl App {
                 self.coverage_files.sort_by(|a, b| a.path.cmp(&b.path));
             }
         }
+    }
+
+    /// Load coverage data from the `.pesticide/coverage.xml` Clover report.
+    pub fn load_coverage(&mut self) -> Result<(), anyhow::Error> {
+        let xml_path = self.project_root.join(".pesticide/coverage.xml");
+        let xml = std::fs::read_to_string(&xml_path)
+            .with_context(|| format!("Failed to read coverage file: {}", xml_path.display()))?;
+        self.coverage_files = coverage::parse_clover_xml(&xml)?;
+        self.sort_coverage();
+        Ok(())
+    }
+
+    /// Load source-level coverage for the currently selected coverage file.
+    pub fn load_coverage_source(&mut self) -> Result<(), anyhow::Error> {
+        if self.coverage_selected >= self.coverage_files.len() {
+            return Ok(());
+        }
+        let file_path = self.coverage_files[self.coverage_selected].path.clone();
+
+        let xml_path = self.project_root.join(".pesticide/coverage.xml");
+        let xml = std::fs::read_to_string(&xml_path)
+            .with_context(|| format!("Failed to read coverage file: {}", xml_path.display()))?;
+
+        let line_hits = coverage::parse_file_line_coverage(&xml, &file_path)?;
+        let source_path = Path::new(&file_path);
+        // If the path in the XML is relative, resolve it against the project root
+        let resolved_path = if source_path.is_absolute() {
+            source_path.to_path_buf()
+        } else {
+            self.project_root.join(source_path)
+        };
+        self.coverage_source_lines = coverage::build_coverage_source(&resolved_path, &line_hits)?;
+        self.coverage_source_scroll = 0;
+        Ok(())
     }
 }
 
@@ -429,6 +470,8 @@ mod tests {
         assert!(app.coverage_source_lines.is_empty());
         assert_eq!(app.coverage_source_scroll, 0);
         assert_eq!(app.coverage_threshold, 80.0);
+        assert!(!app.coverage_pending);
+        assert!(!app.coverage_drill_pending);
         assert!(app.status_message.is_empty());
     }
 }

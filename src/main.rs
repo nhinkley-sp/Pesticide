@@ -113,17 +113,17 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
             while let Ok(watch_event) = watch_rx.try_recv() {
                 match watch_event {
                     WatchEvent::TestFileChanged(path) => {
-                        start_test_run(app, RunScope::File(path), &mut run_handle);
+                        start_test_run(app, RunScope::File(path), &mut run_handle, false);
                     }
                     WatchEvent::SourceFileChanged(_path) => {
-                        start_test_run(app, RunScope::All, &mut run_handle);
+                        start_test_run(app, RunScope::All, &mut run_handle, false);
                     }
                     WatchEvent::TestFileCreatedOrDeleted => {
                         // Re-discover tests, then run all
                         if let Ok(output) = discovery::run_list_tests(&app.project_root) {
                             app.tree = discovery::parse_test_list(&output, &app.project_root);
                         }
-                        start_test_run(app, RunScope::All, &mut run_handle);
+                        start_test_run(app, RunScope::All, &mut run_handle, false);
                     }
                 }
             }
@@ -138,13 +138,44 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                 Ok(Some(_status)) => {
                     app.running = false;
                     run_handle = None;
+
+                    // If a coverage run just finished, load the results and switch view
+                    if app.coverage_pending {
+                        app.coverage_pending = false;
+                        match app.load_coverage() {
+                            Ok(()) => {
+                                app.status_message = format!(
+                                    "Coverage loaded: {} files",
+                                    app.coverage_files.len()
+                                );
+                                app.view_mode = ViewMode::CoverageTable;
+                            }
+                            Err(e) => {
+                                app.status_message = format!("Coverage error: {}", e);
+                            }
+                        }
+                    }
                 }
                 Ok(None) => {
                     // Still running
                 }
                 Err(_) => {
                     app.running = false;
+                    app.coverage_pending = false;
                     run_handle = None;
+                }
+            }
+        }
+
+        // Handle coverage drill-in (Enter pressed on coverage table)
+        if app.coverage_drill_pending {
+            app.coverage_drill_pending = false;
+            match app.load_coverage_source() {
+                Ok(()) => {
+                    app.view_mode = ViewMode::CoverageSource;
+                }
+                Err(e) => {
+                    app.status_message = format!("Coverage source error: {}", e);
                 }
             }
         }
@@ -165,6 +196,7 @@ fn start_test_run(
     app: &mut App,
     scope: RunScope,
     run_handle: &mut Option<pest::runner::RunHandle>,
+    coverage: bool,
 ) {
     // Clear output state
     app.output_lines.clear();
@@ -184,12 +216,15 @@ fn start_test_run(
     }
     *run_handle = None;
 
+    // Track whether coverage was requested so we can load results when the run completes
+    app.coverage_pending = coverage;
+
     // Spawn the test run
     match pest::runner::run_tests(
         &app.project_root,
         &scope,
         app.parallel,
-        false,
+        coverage,
         app.shared_output.clone(),
         app.shared_results.clone(),
     ) {
@@ -198,6 +233,7 @@ fn start_test_run(
         }
         Err(e) => {
             app.running = false;
+            app.coverage_pending = false;
             app.output_lines
                 .push(format!("Failed to start tests: {}", e));
         }
@@ -240,7 +276,10 @@ fn handle_tree_keys(
         }
         KeyCode::Char('p') => app.toggle_parallel(),
         KeyCode::Char('w') => app.toggle_watch(),
-        KeyCode::Char('c') => app.view_mode = ViewMode::CoverageTable,
+        KeyCode::Char('c') => {
+            app.status_message = "Running tests with coverage...".to_string();
+            start_test_run(app, RunScope::All, run_handle, true);
+        }
         KeyCode::Tab => {
             app.focus = match app.focus {
                 FocusPanel::Tree => FocusPanel::Output,
@@ -269,11 +308,11 @@ fn handle_tree_keys(
                         name: node.name.clone(),
                     },
                 };
-                start_test_run(app, scope, run_handle);
+                start_test_run(app, scope, run_handle, false);
             }
         }
         KeyCode::Char('a') => {
-            start_test_run(app, RunScope::All, run_handle);
+            start_test_run(app, RunScope::All, run_handle, false);
         }
         _ => {}
     }
@@ -295,7 +334,9 @@ fn handle_coverage_table_keys(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('s') => app.cycle_coverage_sort(),
-        KeyCode::Enter => app.view_mode = ViewMode::CoverageSource,
+        KeyCode::Enter => {
+            app.coverage_drill_pending = true;
+        }
         _ => {}
     }
 }
