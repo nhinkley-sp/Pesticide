@@ -36,19 +36,27 @@ pub fn parse_test_list(output: &str, project_root: &Path) -> TreeNode {
         // Split namespace segments on backslash
         let segments: Vec<&str> = class_part.split('\\').collect();
 
-        // We need at least 2 segments (e.g. "Tests\SomeTest") to have
-        // a "Tests" prefix to skip plus a class name.
-        if segments.len() < 2 {
-            continue;
-        }
-
-        // Skip the leading "Tests" segment
-        let segments = &segments[1..];
+        // Find "Tests" segment and skip everything up to and including it.
+        // Real output looks like: P\Tests\Feature\Auth\LoginTest
+        let tests_pos = match segments
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case("Tests"))
+        {
+            Some(pos) => pos,
+            None => continue,
+        };
+        let segments = &segments[tests_pos + 1..];
 
         // The last segment is the file (class) name, everything before is directories
         let (dir_segments, file_segment) = segments.split_at(segments.len() - 1);
         let file_name = format!("{}.php", file_segment[0]);
-        let display_name = test_name.replace('_', " ");
+        // Strip __pest_evaluable_ prefix that Pest adds to listed test names
+        let clean_name = test_name
+            .strip_prefix("__pest_evaluable_")
+            .unwrap_or(test_name);
+        // Double underscores represent literal underscores in the original test name,
+        // single underscores represent spaces
+        let display_name = clean_name.replace("__", "\x00").replace('_', " ").replace('\x00', "_");
 
         // Build the path incrementally for node paths
         let mut current_path = project_root.to_path_buf();
@@ -143,12 +151,13 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    // Matches real Pest output format: P\Tests\... with __pest_evaluable_ prefix
     const SAMPLE_OUTPUT: &str = "\
-- Tests\\Feature\\Auth\\LoginTest::it_can_login_with_valid_credentials
-- Tests\\Feature\\Auth\\LoginTest::it_rejects_invalid_password
-- Tests\\Feature\\Auth\\RegisterTest::it_can_register_new_user
-- Tests\\Unit\\Models\\PlayerTest::it_returns_false_when_player_has_no_injuries
-- Tests\\Unit\\Models\\PlayerTest::it_returns_true_when_player_has_active_injury
+- P\\Tests\\Feature\\Auth\\LoginTest::__pest_evaluable_it_can_login_with_valid_credentials
+- P\\Tests\\Feature\\Auth\\LoginTest::__pest_evaluable_it_rejects_invalid_password
+- P\\Tests\\Feature\\Auth\\RegisterTest::__pest_evaluable_it_can_register_new_user
+- P\\Tests\\Unit\\Models\\PlayerTest::__pest_evaluable_it_returns_false_when_player_has_no_injuries
+- P\\Tests\\Unit\\Models\\PlayerTest::__pest_evaluable_it_returns_true_when_player_has_active_injury
 ";
 
     #[test]
@@ -223,6 +232,22 @@ random garbage
         assert_eq!(root.test_count, 1);
         assert_eq!(root.children.len(), 1);
         assert_eq!(root.children[0].name, "Feature");
+    }
+
+    #[test]
+    fn test_parse_pest_evaluable_prefix_and_double_underscores() {
+        let input = "- P\\Tests\\Feature\\UserTest::__pest_evaluable_it_sets_check__card_when_igt__id_changes\n";
+        let root = parse_test_list(input, &PathBuf::from("/project"));
+        let file = &root.children[0].children[0]; // Feature > UserTest.php
+        assert_eq!(file.children[0].name, "it sets check_card when igt_id changes");
+    }
+
+    #[test]
+    fn test_parse_without_pest_evaluable_prefix() {
+        // Also handles the old format without __pest_evaluable_
+        let input = "- Tests\\Feature\\SomeTest::it_works_fine\n";
+        let root = parse_test_list(input, &PathBuf::from("/project"));
+        assert_eq!(root.children[0].children[0].children[0].name, "it works fine");
     }
 
     #[test]
