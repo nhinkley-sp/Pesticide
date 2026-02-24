@@ -1,5 +1,7 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
+use crate::pest::runner::TestResult;
 use crate::tree::node::{NodeKind, TreeNode};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +69,8 @@ pub struct App {
     pub coverage_source_scroll: usize,
     pub coverage_threshold: f64,
     pub status_message: String,
+    pub shared_output: Arc<Mutex<Vec<String>>>,
+    pub shared_results: Arc<Mutex<Vec<TestResult>>>,
 }
 
 impl App {
@@ -92,6 +96,8 @@ impl App {
             coverage_source_scroll: 0,
             coverage_threshold: 80.0,
             status_message: String::new(),
+            shared_output: Arc::new(Mutex::new(Vec::new())),
+            shared_results: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -159,6 +165,44 @@ impl App {
     /// Toggle watch mode.
     pub fn toggle_watch(&mut self) {
         self.watching = !self.watching;
+    }
+
+    /// Drains shared_output into output_lines and shared_results into apply_test_result.
+    pub fn sync_output(&mut self) {
+        // Drain shared output lines
+        if let Ok(mut lines) = self.shared_output.lock() {
+            self.output_lines.append(&mut *lines);
+        }
+
+        // Drain shared results and apply each
+        let results: Vec<TestResult> = {
+            if let Ok(mut res) = self.shared_results.lock() {
+                res.drain(..).collect()
+            } else {
+                Vec::new()
+            }
+        };
+        for result in &results {
+            self.apply_test_result(result);
+        }
+    }
+
+    /// Recursively walks the tree to find a test node matching `result.name` and updates its status.
+    pub fn apply_test_result(&mut self, result: &TestResult) {
+        Self::apply_result_to_node(&mut self.tree, result);
+    }
+
+    fn apply_result_to_node(node: &mut TreeNode, result: &TestResult) -> bool {
+        if node.kind == NodeKind::Test && node.name == result.name {
+            node.status = result.status.clone();
+            return true;
+        }
+        for child in &mut node.children {
+            if Self::apply_result_to_node(child, result) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Cycle through coverage sort modes:

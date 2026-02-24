@@ -16,8 +16,11 @@ use ratatui::prelude::*;
 
 use app::{App, FocusPanel, ViewMode};
 use pest::discovery;
+use pest::runner::RunScope;
+use tree::node::NodeKind;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Find project root
     let cwd = std::env::current_dir()?;
     let project_root = discovery::find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
@@ -52,6 +55,8 @@ fn main() -> Result<()> {
 }
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+    let mut run_handle: Option<pest::runner::RunHandle> = None;
+
     loop {
         terminal.draw(|f| ui::render(f, app))?;
 
@@ -64,20 +69,91 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                 }
 
                 match app.view_mode {
-                    ViewMode::Tree => handle_tree_keys(app, key.code),
+                    ViewMode::Tree => handle_tree_keys(app, key.code, &mut run_handle),
                     ViewMode::CoverageTable => handle_coverage_table_keys(app, key.code),
                     ViewMode::CoverageSource => handle_coverage_source_keys(app, key.code),
                 }
             }
         }
 
+        // Sync shared output from runner into app state
+        app.sync_output();
+
+        // Check if child process has exited
+        if let Some(ref mut handle) = run_handle {
+            match handle.child.try_wait() {
+                Ok(Some(_status)) => {
+                    app.running = false;
+                    run_handle = None;
+                }
+                Ok(None) => {
+                    // Still running
+                }
+                Err(_) => {
+                    app.running = false;
+                    run_handle = None;
+                }
+            }
+        }
+
         if app.should_quit {
+            // Kill running process if any
+            if let Some(ref mut handle) = run_handle {
+                handle.kill();
+            }
             return Ok(());
         }
     }
 }
 
-fn handle_tree_keys(app: &mut App, key: KeyCode) {
+fn start_test_run(
+    app: &mut App,
+    scope: RunScope,
+    run_handle: &mut Option<pest::runner::RunHandle>,
+) {
+    // Clear output state
+    app.output_lines.clear();
+    app.output_scroll = 0;
+    if let Ok(mut lines) = app.shared_output.lock() {
+        lines.clear();
+    }
+    if let Ok(mut res) = app.shared_results.lock() {
+        res.clear();
+    }
+
+    app.running = true;
+
+    // Kill existing run if any
+    if let Some(ref mut handle) = run_handle {
+        handle.kill();
+    }
+    *run_handle = None;
+
+    // Spawn the test run
+    match pest::runner::run_tests(
+        &app.project_root,
+        &scope,
+        app.parallel,
+        false,
+        app.shared_output.clone(),
+        app.shared_results.clone(),
+    ) {
+        Ok(handle) => {
+            *run_handle = Some(handle);
+        }
+        Err(e) => {
+            app.running = false;
+            app.output_lines
+                .push(format!("Failed to start tests: {}", e));
+        }
+    }
+}
+
+fn handle_tree_keys(
+    app: &mut App,
+    key: KeyCode,
+    run_handle: &mut Option<pest::runner::RunHandle>,
+) {
     match key {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Up | KeyCode::Char('k') => {
@@ -127,10 +203,22 @@ fn handle_tree_keys(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Enter => {
-            // Test running will be wired in Task 9
+            // Determine scope based on selected node kind
+            if let Some(node) = app.selected_node() {
+                let scope = match &node.kind {
+                    NodeKind::Root => RunScope::All,
+                    NodeKind::Directory => RunScope::Directory(node.path.clone()),
+                    NodeKind::File => RunScope::File(node.path.clone()),
+                    NodeKind::Test => RunScope::Test {
+                        file: node.path.clone(),
+                        name: node.name.clone(),
+                    },
+                };
+                start_test_run(app, scope, run_handle);
+            }
         }
         KeyCode::Char('a') => {
-            // Run all will be wired in Task 9
+            start_test_run(app, RunScope::All, run_handle);
         }
         _ => {}
     }
