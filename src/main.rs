@@ -38,6 +38,14 @@ struct Cli {
     /// Start with watch mode enabled
     #[arg(short, long)]
     watch: bool,
+
+    /// Run all tests immediately on launch
+    #[arg(short, long)]
+    run: bool,
+
+    /// Run all tests with coverage immediately on launch
+    #[arg(long)]
+    coverage: bool,
 }
 
 #[tokio::main]
@@ -61,6 +69,10 @@ async fn main() -> Result<()> {
     app.parallel = !cli.no_parallel;
     app.watching = cli.watch;
 
+    // Determine initial run mode from CLI flags
+    let initial_coverage = cli.coverage;
+    let initial_run = cli.run || cli.coverage;
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -68,7 +80,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut app);
+    let result = run_loop(&mut terminal, &mut app, initial_run, initial_coverage);
 
     // Restore terminal
     disable_raw_mode()?;
@@ -82,8 +94,18 @@ async fn main() -> Result<()> {
     result
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    initial_run: bool,
+    initial_coverage: bool,
+) -> Result<()> {
     let mut run_handle: Option<pest::runner::RunHandle> = None;
+
+    // If --run or --coverage was passed, kick off the test run immediately
+    if initial_run {
+        start_test_run(app, RunScope::All, &mut run_handle, initial_coverage);
+    }
 
     // Channel for file-watcher events
     let (watch_tx, watch_rx) = mpsc::channel::<WatchEvent>();
@@ -95,6 +117,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
     let mut was_watching = false;
 
     loop {
+        app.tick = app.tick.wrapping_add(1);
         terminal.draw(|f| ui::render(f, app))?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -111,7 +134,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                     match app.view_mode {
                         ViewMode::Tree => handle_tree_keys(app, key.code, &mut run_handle),
                         ViewMode::CoverageTable => handle_coverage_table_keys(app, key.code),
-                        ViewMode::CoverageSource => handle_coverage_source_keys(app, key.code),
+                        ViewMode::CoverageTree => handle_coverage_tree_keys(app, key.code),
+                        ViewMode::CoverageSource => handle_coverage_source_keys(app, key),
                     }
                 }
             }
@@ -170,8 +194,20 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
 
                     // Parse JUnit results and update tree
                     let results = pest::runner::parse_junit_results(&app.project_root);
+                    let total = results.len();
+                    let mut matched = 0;
                     for result in &results {
-                        app.apply_test_result(result);
+                        if app.apply_test_result(result) {
+                            matched += 1;
+                        }
+                    }
+                    if total > 0 {
+                        app.status_message = format!(
+                            "Done: {}/{} tests matched",
+                            matched, total
+                        );
+                    } else {
+                        app.status_message = "Done: no results found in JUnit XML".to_string();
                     }
 
                     // If a coverage run just finished, load the results and switch view
@@ -179,6 +215,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                         app.coverage_pending = false;
                         match app.load_coverage() {
                             Ok(()) => {
+                                app.build_coverage_tree();
                                 app.status_message = format!(
                                     "Coverage loaded: {} files",
                                     app.coverage_files.len()
@@ -208,6 +245,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
             match app.load_coverage_source() {
                 Ok(()) => {
                     app.view_mode = ViewMode::CoverageSource;
+                    // Jump to first uncovered line if one exists
+                    if let Some(pos) = app
+                        .coverage_source_lines
+                        .iter()
+                        .position(|l| l.status == crate::app::LineCoverageStatus::Uncovered)
+                    {
+                        app.coverage_source_scroll = pos;
+                    }
                 }
                 Err(e) => {
                     app.status_message = format!("Coverage source error: {}", e);
@@ -408,6 +453,10 @@ fn handle_coverage_table_keys(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char('s') => app.cycle_coverage_sort(),
+        KeyCode::Char('t') => {
+            app.build_coverage_tree();
+            app.view_mode = ViewMode::CoverageTree;
+        }
         KeyCode::Enter => {
             app.coverage_drill_pending = true;
         }
@@ -415,8 +464,66 @@ fn handle_coverage_table_keys(app: &mut App, key: KeyCode) {
     }
 }
 
-fn handle_coverage_source_keys(app: &mut App, key: KeyCode) {
+fn handle_coverage_tree_keys(app: &mut App, key: KeyCode) {
     match key {
+        KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Esc => app.view_mode = ViewMode::Tree,
+        KeyCode::Char('t') => app.view_mode = ViewMode::CoverageTable,
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.coverage_tree_selected > 0 {
+                app.coverage_tree_selected -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let max = app.visible_coverage_tree_nodes().len().saturating_sub(1);
+            if app.coverage_tree_selected < max {
+                app.coverage_tree_selected += 1;
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            app.toggle_coverage_tree_expand(); // collapse
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            app.toggle_coverage_tree_expand(); // expand
+        }
+        KeyCode::Enter => {
+            // Drill into file source view if a file is selected
+            if let Some(file) = app.selected_coverage_tree_file() {
+                // Find the index of this file in coverage_files for load_coverage_source
+                if let Some(idx) = app
+                    .coverage_files
+                    .iter()
+                    .position(|f| f.path == file.path)
+                {
+                    app.coverage_selected = idx;
+                    app.coverage_drill_pending = true;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_coverage_source_keys(app: &mut App, key: event::KeyEvent) {
+    let half_page = 20;
+
+    // Handle Ctrl+U / Ctrl+D for half-page scrolling
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('u') => {
+                app.coverage_source_scroll = app.coverage_source_scroll.saturating_sub(half_page);
+                return;
+            }
+            KeyCode::Char('d') => {
+                let max = app.coverage_source_lines.len().saturating_sub(1);
+                app.coverage_source_scroll = (app.coverage_source_scroll + half_page).min(max);
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Esc => app.view_mode = ViewMode::CoverageTable,
         KeyCode::Up | KeyCode::Char('k') => {

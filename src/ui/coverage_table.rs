@@ -16,6 +16,12 @@ pub fn render_coverage_table(f: &mut Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line> = Vec::new();
 
+    // Fixed column widths: " Lines" (7) + " Hit" (7) + " Miss" (7) + " pct%" (6) = 27
+    let fixed_cols: usize = 27;
+    let total_width = area.width as usize;
+    // Path column takes all remaining width (minimum 20 chars)
+    let path_width = total_width.saturating_sub(fixed_cols).max(20);
+
     // Calculate total coverage percentage from all files
     let total_lines: usize = app.coverage_files.iter().map(|f| f.lines).sum();
     let total_hits: usize = app.coverage_files.iter().map(|f| f.hits).sum();
@@ -44,11 +50,11 @@ pub fn render_coverage_table(f: &mut Frame, area: Rect, app: &App) {
     // Blank line
     lines.push(Line::from(""));
 
-    // Column headers: File  Lines  Hit  Miss  %
-    // Use fixed-width columns for alignment
+    // Column headers
     let header_text = format!(
-        "{:<45} {:>6} {:>6} {:>6} {:>5}",
-        "File", "Lines", "Hit", "Miss", "%"
+        "{:<pw$} {:>6} {:>6} {:>6} {:>5}",
+        "File", "Lines", "Hit", "Miss", "%",
+        pw = path_width,
     );
     lines.push(Line::from(Span::styled(
         header_text,
@@ -60,9 +66,9 @@ pub fn render_coverage_table(f: &mut Frame, area: Rect, app: &App) {
         let is_selected = i == app.coverage_selected;
         let below_threshold = cf.percent < app.coverage_threshold;
 
-        // Truncate file path to 45 chars with "..." prefix if too long
-        let display_path = if cf.path.len() > 45 {
-            let truncated = &cf.path[cf.path.len() - 44..];
+        // Truncate file path with ellipsis only if it exceeds available width
+        let display_path = if cf.path.len() > path_width {
+            let truncated = &cf.path[cf.path.len() - (path_width - 1)..];
             format!("\u{2026}{}", truncated)
         } else {
             cf.path.clone()
@@ -93,11 +99,23 @@ pub fn render_coverage_table(f: &mut Frame, area: Rect, app: &App) {
             Style::default()
         };
 
+        // Split path into directory + filename, highlight the filename
+        let (dir_part, file_part) = match display_path.rfind('/') {
+            Some(pos) => (&display_path[..=pos], &display_path[pos + 1..]),
+            None => ("", display_path.as_str()),
+        };
+        let padding_needed = path_width.saturating_sub(display_path.len());
+
         let mut spans = vec![
             Span::styled(
-                format!("{:<45}", display_path),
-                Style::default().fg(text_color),
+                dir_part.to_string(),
+                Style::default().fg(Color::DarkGray),
             ),
+            Span::styled(
+                file_part.to_string(),
+                Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(padding_needed)),
             Span::styled(
                 format!(" {:>6}", cf.lines),
                 Style::default().fg(text_color),

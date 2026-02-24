@@ -1,5 +1,6 @@
 mod coverage_source;
 mod coverage_table;
+mod coverage_tree;
 mod footer;
 mod output;
 mod tree;
@@ -37,6 +38,7 @@ pub fn render(f: &mut Frame, app: &App) {
     match app.view_mode {
         ViewMode::Tree => tree::render_tree(f, chunks[1], app),
         ViewMode::CoverageTable => coverage_table::render_coverage_table(f, chunks[1], app),
+        ViewMode::CoverageTree => coverage_tree::render_coverage_tree(f, chunks[1], app),
         ViewMode::CoverageSource => coverage_source::render_coverage_source(f, chunks[1], app),
     }
 
@@ -79,8 +81,10 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     }
 
     if app.running {
+        const THROBBER: &[char] = &['\u{2801}', '\u{2809}', '\u{2819}', '\u{281b}', '\u{281e}', '\u{2836}', '\u{2834}', '\u{2824}', '\u{2826}', '\u{2827}'];
+        let frame = THROBBER[app.tick % THROBBER.len()];
         spans.push(Span::styled(
-            "  \u{27f3} running",
+            format!("  {} running", frame),
             Style::default().fg(Color::Yellow),
         ));
     }

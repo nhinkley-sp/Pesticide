@@ -20,6 +20,8 @@ pub enum RunScope {
 pub struct TestResult {
     pub name: String,
     pub status: TestStatus,
+    /// PHP class name from JUnit, e.g. `Tests\Feature\Auth\LoginTest`
+    pub class: Option<String>,
 }
 
 pub struct RunHandle {
@@ -186,7 +188,12 @@ pub fn parse_junit_results(project_root: &Path) -> Vec<TestResult> {
             TestStatus::Passed
         };
 
-        results.push(TestResult { name, status });
+        let class = testcase
+            .attribute("class")
+            .or_else(|| testcase.attribute("classname"))
+            .map(|s| s.to_string());
+
+        results.push(TestResult { name, status, class });
     }
 
     results
@@ -404,6 +411,7 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].name, "it can login");
         assert_eq!(results[0].status, TestStatus::Passed);
+        assert_eq!(results[0].class, Some("Tests\\Feature\\AuthTest".to_string()));
         assert_eq!(results[1].name, "it rejects bad password");
         assert_eq!(results[1].status, TestStatus::Failed);
     }
