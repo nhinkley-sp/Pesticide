@@ -103,6 +103,9 @@ pub struct App {
     pub coverage_drill_pending: bool,
     pub coverage_tree_root: Option<CoverageTreeNode>,
     pub coverage_tree_selected: usize,
+    /// When true, a watch event fired while tests were already running.
+    /// The run will be re-triggered once the current run finishes.
+    pub rerun_pending: bool,
     pub status_message: String,
     pub shared_output: Arc<Mutex<Vec<String>>>,
     pub shared_results: Arc<Mutex<Vec<TestResult>>>,
@@ -137,6 +140,7 @@ impl App {
             coverage_drill_pending: false,
             coverage_tree_root: None,
             coverage_tree_selected: 0,
+            rerun_pending: false,
             status_message: String::new(),
             shared_output: Arc::new(Mutex::new(Vec::new())),
             shared_results: Arc::new(Mutex::new(Vec::new())),

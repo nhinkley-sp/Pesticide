@@ -161,22 +161,28 @@ fn run_loop(
         }
         was_watching = app.watching;
 
-        // Process file-watcher events (non-blocking)
+        // Process file-watcher events (non-blocking).
+        // If tests are already running, defer the re-run to avoid an infinite
+        // kill-restart loop (running tests can modify files that trigger the watcher).
         if app.watching {
-            while let Ok(watch_event) = watch_rx.try_recv() {
-                match watch_event {
-                    WatchEvent::TestFileChanged(path) => {
-                        start_test_run(app, RunScope::File(path), &mut run_handle, false);
-                    }
-                    WatchEvent::SourceFileChanged(_path) => {
-                        start_test_run(app, RunScope::All, &mut run_handle, false);
-                    }
-                    WatchEvent::TestFileCreatedOrDeleted => {
-                        // Re-discover tests, then run all
-                        if let Ok(output) = discovery::run_list_tests(&app.project_root) {
-                            app.tree = discovery::parse_test_list(&output, &app.project_root);
+            while let Ok(_watch_event) = watch_rx.try_recv() {
+                if app.running {
+                    app.rerun_pending = true;
+                } else {
+                    match _watch_event {
+                        WatchEvent::TestFileChanged(path) => {
+                            start_test_run(app, RunScope::File(path), &mut run_handle, false);
                         }
-                        start_test_run(app, RunScope::All, &mut run_handle, false);
+                        WatchEvent::SourceFileChanged(_path) => {
+                            start_test_run(app, RunScope::All, &mut run_handle, false);
+                        }
+                        WatchEvent::TestFileCreatedOrDeleted => {
+                            // Re-discover tests, then run all
+                            if let Ok(output) = discovery::run_list_tests(&app.project_root) {
+                                app.tree = discovery::parse_test_list(&output, &app.project_root);
+                            }
+                            start_test_run(app, RunScope::All, &mut run_handle, false);
+                        }
                     }
                 }
             }
@@ -208,6 +214,12 @@ fn run_loop(
                         );
                     } else {
                         app.status_message = "Done: no results found in JUnit XML".to_string();
+                    }
+
+                    // If a watch event fired while we were running, re-run now.
+                    if app.rerun_pending {
+                        app.rerun_pending = false;
+                        start_test_run(app, RunScope::All, &mut run_handle, false);
                     }
 
                     // If a coverage run just finished, load the results and switch view
