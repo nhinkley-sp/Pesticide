@@ -103,6 +103,8 @@ pub struct App {
     pub coverage_drill_pending: bool,
     pub coverage_tree_root: Option<CoverageTreeNode>,
     pub coverage_tree_selected: usize,
+    /// Which view to return to when pressing Esc in coverage source view.
+    pub coverage_source_return_view: ViewMode,
     /// When true, a watch event fired while tests were already running.
     /// The run will be re-triggered once the current run finishes.
     pub rerun_pending: bool,
@@ -140,6 +142,7 @@ impl App {
             coverage_drill_pending: false,
             coverage_tree_root: None,
             coverage_tree_selected: 0,
+            coverage_source_return_view: ViewMode::CoverageTable,
             rerun_pending: false,
             status_message: String::new(),
             shared_output: Arc::new(Mutex::new(Vec::new())),
@@ -430,13 +433,47 @@ impl App {
             }
         }
 
+        // Find the longest common directory prefix so the tree starts at a
+        // meaningful folder instead of the filesystem root.
+        let common_prefix = if self.coverage_files.is_empty() {
+            String::new()
+        } else {
+            let first_parts: Vec<&str> = self.coverage_files[0].path.split('/').collect();
+            let mut prefix_len = first_parts.len().saturating_sub(1); // exclude filename
+            for file in &self.coverage_files[1..] {
+                let parts: Vec<&str> = file.path.split('/').collect();
+                let file_dir_len = parts.len().saturating_sub(1);
+                prefix_len = prefix_len.min(file_dir_len);
+                for i in 0..prefix_len {
+                    if parts[i] != first_parts[i] {
+                        prefix_len = i;
+                        break;
+                    }
+                }
+            }
+            first_parts[..prefix_len].join("/")
+        };
+
+        let strip_count = if common_prefix.is_empty() {
+            0
+        } else {
+            common_prefix.split('/').count()
+        };
+
+        let root_name = if common_prefix.is_empty() {
+            "Coverage".to_string()
+        } else {
+            common_prefix.split('/').last().unwrap_or("Coverage").to_string()
+        };
+
         let mut root_builder = DirBuilder::new();
         for file in &self.coverage_files {
             let parts: Vec<&str> = file.path.split('/').collect();
-            root_builder.insert(&parts, file);
+            let trimmed = &parts[strip_count..];
+            root_builder.insert(trimmed, file);
         }
 
-        self.coverage_tree_root = Some(root_builder.to_node("Coverage".to_string(), String::new()));
+        self.coverage_tree_root = Some(root_builder.to_node(root_name, common_prefix));
         self.coverage_tree_selected = 0;
     }
 
@@ -469,6 +506,39 @@ impl App {
                     Self::toggle_coverage_node(root, &path);
                 }
             }
+        }
+    }
+
+    /// Collapse or expand all directory nodes in the coverage tree.
+    pub fn set_all_coverage_tree_expanded(&mut self, expanded: bool) {
+        if let Some(ref mut root) = self.coverage_tree_root {
+            Self::set_expanded_recursive(root, expanded);
+        }
+        if !expanded {
+            self.coverage_tree_selected = 0;
+        }
+    }
+
+    fn set_expanded_recursive(node: &mut CoverageTreeNode, expanded: bool) {
+        if !node.is_file {
+            node.expanded = expanded;
+        }
+        for child in &mut node.children {
+            Self::set_expanded_recursive(child, expanded);
+        }
+    }
+
+    /// Returns the total coverage percentage across all files, if coverage data exists.
+    pub fn total_coverage_percent(&self) -> Option<f64> {
+        if self.coverage_files.is_empty() {
+            return None;
+        }
+        let total_lines: usize = self.coverage_files.iter().map(|f| f.lines).sum();
+        let total_hits: usize = self.coverage_files.iter().map(|f| f.hits).sum();
+        if total_lines > 0 {
+            Some((total_hits as f64 / total_lines as f64) * 100.0)
+        } else {
+            None
         }
     }
 
@@ -530,6 +600,8 @@ fn lossy_normalize(name: &str) -> String {
         .replace("::", "_")
         // Comma+space → underscore (Pest encodes as `__`, discovery reverses to `_`)
         .replace(", ", "_")
+        // Forward slashes → space (Pest encodes as `_`, discovery reverses to space)
+        .replace('/', " ")
         // Hyphens → space (Pest encodes as `_`, discovery reverses to space)
         .replace('-', " ")
         // Normalize arrow separator: `_→` and ` → ` to a single canonical form
@@ -575,6 +647,20 @@ fn names_match(tree_name: &str, result_name: &str) -> bool {
 
     // Case-insensitive fallback
     if tree_trimmed.eq_ignore_ascii_case(result_trimmed) {
+        return true;
+    }
+
+    // Alphanumeric-only fallback: strip all punctuation from both sides.
+    // Handles parentheses, apostrophes, and any other chars Pest encodes as `_`.
+    let alpha_only = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    if alpha_only(tree_trimmed) == alpha_only(result_trimmed) {
         return true;
     }
 
@@ -863,6 +949,29 @@ mod tests {
         assert!(names_match(
             "it returns empty cost distribution when all costs are zero.",
             "it returns empty cost distribution when all costs are zero"
+        ));
+    }
+
+    #[test]
+    fn test_names_match_forward_slashes() {
+        // Forward slashes in JUnit become spaces in tree (Pest encodes as _)
+        assert!(names_match(
+            "it requires abn for sole trader owner managers",
+            "it requires abn for sole trader owner/managers"
+        ));
+    }
+
+    #[test]
+    fn test_lossy_normalize_forward_slashes() {
+        assert_eq!(lossy_normalize("owner/managers"), "owner managers");
+    }
+
+    #[test]
+    fn test_names_match_parentheses() {
+        // Parentheses in JUnit become spaces in tree (Pest encodes as _)
+        assert!(names_match(
+            "it creates a device and registers it integration test",
+            "it creates a device and registers it (integration test)"
         ));
     }
 

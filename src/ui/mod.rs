@@ -98,6 +98,23 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // Show total coverage percentage in coverage views
+    if matches!(app.view_mode, ViewMode::CoverageTable | ViewMode::CoverageTree | ViewMode::CoverageSource) {
+        if let Some(pct) = app.total_coverage_percent() {
+            let color = if pct >= 80.0 {
+                Color::Green
+            } else if pct >= 50.0 {
+                Color::Yellow
+            } else {
+                Color::Red
+            };
+            spans.push(Span::styled(
+                format!("  {:.1}% coverage", pct),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+
     if !app.status_message.is_empty() {
         spans.push(Span::styled(
             format!("  {}", app.status_message),

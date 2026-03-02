@@ -91,6 +91,12 @@ async fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
+    // Clean up .pesticide/ artifacts
+    let pesticide_dir = app.project_root.join(".pesticide");
+    if pesticide_dir.exists() {
+        let _ = std::fs::remove_dir_all(&pesticide_dir);
+    }
+
     result
 }
 
@@ -202,9 +208,16 @@ fn run_loop(
                     let results = pest::runner::parse_junit_results(&app.project_root);
                     let total = results.len();
                     let mut matched = 0;
+                    let mut unmatched: Vec<String> = Vec::new();
                     for result in &results {
                         if app.apply_test_result(result) {
                             matched += 1;
+                        } else {
+                            let class_info = result.class.as_deref().unwrap_or("?");
+                            unmatched.push(format!(
+                                "  UNMATCHED: [{}] {}",
+                                class_info, result.name
+                            ));
                         }
                     }
                     if total > 0 {
@@ -214,6 +227,14 @@ fn run_loop(
                         );
                     } else {
                         app.status_message = "Done: no results found in JUnit XML".to_string();
+                    }
+                    if !unmatched.is_empty() {
+                        app.output_lines.push(String::new());
+                        app.output_lines.push(format!(
+                            "--- {} unmatched test(s) ---",
+                            unmatched.len()
+                        ));
+                        app.output_lines.extend(unmatched);
                     }
 
                     // If a watch event fired while we were running, re-run now.
@@ -470,6 +491,7 @@ fn handle_coverage_table_keys(app: &mut App, key: KeyCode) {
             app.view_mode = ViewMode::CoverageTree;
         }
         KeyCode::Enter => {
+            app.coverage_source_return_view = ViewMode::CoverageTable;
             app.coverage_drill_pending = true;
         }
         _ => {}
@@ -498,18 +520,38 @@ fn handle_coverage_tree_keys(app: &mut App, key: KeyCode) {
         KeyCode::Right | KeyCode::Char('l') => {
             app.toggle_coverage_tree_expand(); // expand
         }
+        KeyCode::Char('z') => {
+            // Toggle fold all: if root is expanded, collapse all; otherwise expand all
+            let should_expand = app
+                .coverage_tree_root
+                .as_ref()
+                .map(|r| !r.expanded || r.children.iter().any(|c| !c.is_file && !c.expanded))
+                .unwrap_or(false);
+            app.set_all_coverage_tree_expanded(should_expand);
+        }
         KeyCode::Enter => {
-            // Drill into file source view if a file is selected
-            if let Some(file) = app.selected_coverage_tree_file() {
-                // Find the index of this file in coverage_files for load_coverage_source
-                if let Some(idx) = app
-                    .coverage_files
-                    .iter()
-                    .position(|f| f.path == file.path)
-                {
-                    app.coverage_selected = idx;
-                    app.coverage_drill_pending = true;
+            let nodes = app.visible_coverage_tree_nodes();
+            let is_file = nodes
+                .get(app.coverage_tree_selected)
+                .map(|(_, n)| n.is_file)
+                .unwrap_or(false);
+
+            if is_file {
+                // Drill into file source view
+                if let Some(file) = app.selected_coverage_tree_file() {
+                    if let Some(idx) = app
+                        .coverage_files
+                        .iter()
+                        .position(|f| f.path == file.path)
+                    {
+                        app.coverage_selected = idx;
+                        app.coverage_drill_pending = true;
+                        app.coverage_source_return_view = ViewMode::CoverageTree;
+                    }
                 }
+            } else {
+                // Toggle expand/collapse for directories
+                app.toggle_coverage_tree_expand();
             }
         }
         _ => {}
@@ -537,7 +579,7 @@ fn handle_coverage_source_keys(app: &mut App, key: event::KeyEvent) {
 
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Esc => app.view_mode = ViewMode::CoverageTable,
+        KeyCode::Esc => app.view_mode = app.coverage_source_return_view.clone(),
         KeyCode::Up | KeyCode::Char('k') => {
             app.coverage_source_scroll = app.coverage_source_scroll.saturating_sub(1);
         }
