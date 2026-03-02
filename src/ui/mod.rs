@@ -13,22 +13,27 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, ViewMode};
+use crate::app::{App, FocusPanel, ViewMode};
 
 /// Main render function that draws the entire TUI.
 ///
 /// Layout (vertical):
 ///   1. Header  — 1 line
 ///   2. Main    — flexible (tree view, coverage table, or coverage source)
-///   3. Output  — 10 lines
+///   3. Output  — 10 lines (expands to 70% when focused)
 ///   4. Footer  — 1 line
 pub fn render(f: &mut Frame, app: &App) {
+    let (main_constraint, output_constraint) = match app.focus {
+        FocusPanel::Output => (Constraint::Percentage(30), Constraint::Percentage(70)),
+        FocusPanel::Tree => (Constraint::Min(5), Constraint::Length(10)),
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),  // Header
-            Constraint::Min(5),    // Main content
-            Constraint::Length(10), // Output panel
+            main_constraint,       // Main content
+            output_constraint,     // Output panel
             Constraint::Length(1),  // Footer
         ])
         .split(f.area());
