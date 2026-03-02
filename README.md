@@ -86,8 +86,9 @@ pesticide --run --watch
 |-----|--------|
 | `j` / `k` | Navigate |
 | `h` / `l` | Collapse/expand directories |
+| `z` | Fold/expand all |
+| `Enter` | Expand directory / drill into file source |
 | `t` | Switch to table view |
-| `Enter` | View source coverage |
 | `Esc` | Back to test tree |
 
 ### Coverage Source
@@ -97,7 +98,7 @@ pesticide --run --watch
 | `j` / `k` | Scroll line by line |
 | `Ctrl+U` / `Ctrl+D` | Half-page scroll |
 | `n` | Jump to next uncovered line |
-| `Esc` | Back to coverage list |
+| `Esc` | Back to previous view |
 
 ### Output Panel (Tab to focus)
 
@@ -114,7 +115,7 @@ pesticide --run --watch
 4. **Coverage** - Generates Clover XML via `--coverage-clover`, parses file and line-level data
 5. **Watch** - Uses `notify` to watch `tests/` and `app/` directories, debounces events, and triggers targeted re-runs
 
-Test artifacts are stored in `.pesticide/` (auto-gitignored).
+Test artifacts are stored in `.pesticide/` during a session and cleaned up on exit.
 
 ## Project Structure
 
@@ -150,6 +151,37 @@ src/
 | [roxmltree](https://docs.rs/roxmltree) | XML parsing (JUnit, Clover) |
 | [clap](https://docs.rs/clap) | CLI argument parsing |
 | [anyhow](https://docs.rs/anyhow) | Error handling |
+
+## Neovim Integration
+
+Add to `~/.config/nvim/lua/plugins/pesticide.lua` (requires [snacks.nvim](https://github.com/folke/snacks.nvim)):
+
+```lua
+local function pesticide(cmd_flags, win_opts)
+  Snacks.terminal.toggle("pesticide " .. cmd_flags, {
+    cwd = vim.fn.getcwd(),
+    win = win_opts,
+  })
+end
+
+local sidebar = { position = "right", width = 0.4, border = "left" }
+local floating = { position = "float", width = 0.8, height = 0.8, border = "rounded" }
+
+return {
+  {
+    "folke/snacks.nvim",
+    keys = {
+      { "<leader>to", function() pesticide("--watch", sidebar) end, desc = "Pesticide (sidebar)" },
+      { "<leader>tr", function() pesticide("--watch --run", sidebar) end, desc = "Pesticide run all (sidebar)" },
+      { "<leader>tc", function() pesticide("--watch --coverage", sidebar) end, desc = "Pesticide coverage (sidebar)" },
+      { "<leader>tO", function() pesticide("", floating) end, desc = "Pesticide (floating)" },
+      { "<leader>tR", function() pesticide("--run", floating) end, desc = "Pesticide run all (floating)" },
+      { "<leader>tC", function() pesticide("--coverage", floating) end, desc = "Pesticide coverage (floating)" },
+    },
+  },
+  { "folke/which-key.nvim", opts = { spec = { { "<leader>t", group = "test" } } } },
+}
+```
 
 ## License
 
